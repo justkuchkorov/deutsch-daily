@@ -160,7 +160,13 @@ async def do_lesson(bot, chat_id, uid):
         lesson = await gen_lesson(u["level"], u.get("topics", []))
     except Exception as e:
         log.error(f"Gemini error: {e}")
-        await bot.send_message(chat_id, "❌ Lesson generation failed. Try /lesson again.")
+        err = str(e)
+        if "429" in err or "RESOURCE_EXHAUSTED" in err:
+            await bot.send_message(chat_id,
+                "⏳ Daily API limit reached. Resets around 9:00 AM Budapest time.\n"
+                "Try again later!")
+        else:
+            await bot.send_message(chat_id, "❌ Lesson generation failed. Try /lesson again.")
         return
 
     # Save state
@@ -468,7 +474,13 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(reply)
     except Exception as e:
         log.error(f"Chat error: {e}")
-        await update.message.reply_text("❌ Something went wrong. Try again!")
+        err = str(e)
+        if "429" in err or "RESOURCE_EXHAUSTED" in err:
+            await update.message.reply_text(
+                "⏳ Daily API limit reached. Resets around 9:00 AM Budapest time.\n"
+                "Try again later — or use /lesson in the morning!")
+        else:
+            await update.message.reply_text("❌ Something went wrong. Try again!")
 
 
 # ═══════════════════════════

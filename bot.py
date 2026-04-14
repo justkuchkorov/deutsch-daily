@@ -6,7 +6,7 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     CallbackQueryHandler, ContextTypes, filters
 )
-import google.generativeai as genai
+from google import genai
 import edge_tts
 
 # ── Config ──
@@ -18,8 +18,7 @@ GEMINI_KEY = os.environ["GEMINI_KEY"]
 TZ = ZoneInfo("Europe/Budapest")
 DATA = "data.json"
 
-genai.configure(api_key=GEMINI_KEY)
-gemini = genai.GenerativeModel("gemini-2.0-flash")
+client = genai.Client(api_key=GEMINI_KEY)
 
 
 # ═══════════════════════════════════
@@ -111,7 +110,11 @@ Return ONLY valid JSON (no markdown, no ```):
   ]
 }}"""
 
-    resp = await gemini.generate_content_async(prompt)
+    resp = await asyncio.to_thread(
+        client.models.generate_content,
+        model="gemini-2.0-flash",
+        contents=prompt
+    )
     txt = resp.text.strip()
     if txt.startswith("```"):
         txt = re.sub(r"^```\w*\n?", "", txt)
@@ -120,10 +123,7 @@ Return ONLY valid JSON (no markdown, no ```):
 
 
 async def chat_reply(msg, level, history):
-    contents = [
-        {
-            "role": "user",
-            "parts": [f"""You are a friendly German tutor for a {level} student.
+    system = f"""You are a friendly German tutor for a {level} student.
 
 Rules:
 - If they write in German: reply in German, then add corrections/tips in English below
@@ -131,15 +131,19 @@ Rules:
 - Correct grammar mistakes gently
 - Keep responses under 150 words
 - Be encouraging and natural
-- Match vocabulary to their {level} level"""]
-        },
-        {"role": "model", "parts": ["Verstanden! Ich bin bereit. Let's practice German!"]}
-    ]
-    for h in history[-10:]:
-        contents.append({"role": h["role"], "parts": [h["text"]]})
-    contents.append({"role": "user", "parts": [msg]})
+- Match vocabulary to their {level} level"""
 
-    resp = await gemini.generate_content_async(contents)
+    contents = []
+    for h in history[-10:]:
+        contents.append({"role": h["role"], "parts": [{"text": h["text"]}]})
+    contents.append({"role": "user", "parts": [{"text": msg}]})
+
+    resp = await asyncio.to_thread(
+        client.models.generate_content,
+        model="gemini-2.0-flash",
+        contents=contents,
+        config={"system_instruction": system}
+    )
     return resp.text
 
 

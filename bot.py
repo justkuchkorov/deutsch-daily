@@ -348,7 +348,11 @@ async def do_lesson(bot, chat_id, uid):
         os.unlink(audio)
     except Exception as e:
         log.error(f"TTS error: {e}")
-        await bot.send_message(chat_id, "⚠️ Audio unavailable, moving to questions...")
+        await bot.send_message(chat_id,
+            "⚠️ <b>Audio unavailable</b> — here's the text instead:\n\n"
+            f"<i>{lesson['text']}</i>\n\n"
+            "Read it carefully, then answer the listening questions.",
+            parse_mode="HTML")
 
     await send_q(bot, chat_id, uid)
 

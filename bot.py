@@ -1,4 +1,4 @@
-import os, json, re, logging, tempfile, asyncio
+import os, json, re, logging, tempfile, asyncio, random
 from datetime import datetime, time as dtime
 from zoneinfo import ZoneInfo
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -43,9 +43,10 @@ def uget(uid):
         d[uid] = {
             "level": "A2.1", "hour": 9, "minute": 0,
             "streak": 0, "last": None, "topics": [],
-            "chat": [],
+            "chat": [], "history": [],
             "lesson": None, "phase": None,
-            "q_idx": 0, "score_l": 0, "score_r": 0
+            "q_idx": 0, "score_l": 0, "score_r": 0,
+            "v_idx": 0, "score_v": 0, "wrote": False
         }
         save(d)
     return d[uid]
@@ -71,10 +72,9 @@ async def make_audio(text):
 
 
 # ═══════════════════════════════
-#  GEMINI — lesson generation
+#  GEMINI — AI calls
 # ═══════════════════════════════
 async def gemini_call(prompt, system=None, history=None):
-    """Unified Gemini call with retry logic."""
     if history:
         contents = []
         for h in history[-10:]:
@@ -123,7 +123,7 @@ Pick from diverse, engaging topics like:
 - Psychology: Warum wir Musik mögen, Gewohnheiten ändern, Motivation finden
 
 The text should be INFORMATIVE and teach something interesting, not just describe a routine.
-Use {level} level vocabulary but don't be afraid to introduce 2-3 new harder words (explain them in vocab).
+Use {level} level vocabulary but introduce 2-3 new harder words (explain them in vocab).
 
 Return ONLY valid JSON (no markdown, no ```):
 {{
@@ -202,6 +202,102 @@ Rules:
     return await gemini_call(msg, system=system, history=history)
 
 
+# ══════════════════════════════
+#  VOCAB QUIZ — inline keyboard
+# ══════════════════════════════
+def prepare_vocab_quiz(vocab):
+    """Build quiz: for each word, show German → pick correct English from 4 options."""
+    quiz = []
+    all_en = [v["en"] for v in vocab]
+    for i, word in enumerate(vocab):
+        correct = word["en"]
+        others = [e for j, e in enumerate(all_en) if j != i]
+        random.shuffle(others)
+        wrong = others[:3]
+        opts = [correct] + wrong
+        random.shuffle(opts)
+        quiz.append({
+            "de": word["de"],
+            "opts": opts,
+            "ans": opts.index(correct)
+        })
+    return quiz
+
+
+async def send_vq(bot, chat_id, uid):
+    """Send next vocab quiz question."""
+    u = uget(uid)
+    lesson = u.get("lesson")
+    if not lesson or "vocab_quiz" not in lesson:
+        return
+
+    idx = u.get("v_idx", 0)
+    vq = lesson["vocab_quiz"]
+
+    if idx >= len(vq):
+        await finish_lesson(bot, chat_id, uid)
+        return
+
+    q = vq[idx]
+    buttons = [
+        [InlineKeyboardButton(opt, callback_data=f"vq_{idx}_{i}")]
+        for i, opt in enumerate(q["opts"])
+    ]
+    await bot.send_message(
+        chat_id,
+        f"📝 <b>Vocab {idx + 1}/{len(vq)}:</b> What does <b>{q['de']}</b> mean?",
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode="HTML"
+    )
+
+
+async def finish_lesson(bot, chat_id, uid):
+    """Show final summary and save to history."""
+    u = uget(uid)
+    lesson = u["lesson"]
+    sl = u.get("score_l", 0)
+    sr = u.get("score_r", 0)
+    sv = u.get("score_v", 0)
+    vq_len = len(lesson.get("vocab_quiz", []))
+    wrote = u.get("wrote", False)
+
+    total = sl + sr + sv
+    max_total = 6 + vq_len
+    pct = round(total / max_total * 100) if max_total else 0
+
+    bar_len = 10
+    filled = round(total / max_total * bar_len) if max_total else 0
+    bar = "█" * filled + "░" * (bar_len - filled)
+
+    # Save to history
+    hist = u.get("history", [])
+    hist.append({
+        "date": datetime.now(TZ).strftime("%Y-%m-%d"),
+        "topic": lesson["topic"],
+        "listening": sl, "reading": sr, "vocab": sv,
+        "vocab_total": vq_len, "writing": wrote
+    })
+    # Keep last 100 lessons
+    hist = hist[-100:]
+
+    await bot.send_message(chat_id,
+        f"🏁 <b>Lesson Complete!</b>\n\n"
+        f"📊 <b>Final Score: {total}/{max_total} ({pct}%)</b>\n"
+        f"{bar}\n\n"
+        f"🎧 Listening: {sl}/3\n"
+        f"📖 Reading: {sr}/3\n"
+        f"📝 Vocabulary: {sv}/{vq_len}\n"
+        f"✍️ Writing: {'Done' if wrote else 'Skipped'}\n\n"
+        f"🔥 Streak: {u['streak']} days\n"
+        f"📚 Total lessons: {len(hist)}\n\n"
+        f"💬 Chat with me in German or /lesson for another!",
+        parse_mode="HTML")
+
+    uset(uid, lesson=None, phase=None, q_idx=0,
+         score_l=0, score_r=0, v_idx=0, score_v=0, wrote=False,
+         history=hist)
+
+
 # ══════════════════════════
 #  LESSON FLOW
 # ══════════════════════════
@@ -223,7 +319,6 @@ async def do_lesson(bot, chat_id, uid):
             await bot.send_message(chat_id, "❌ Lesson generation failed. Try /lesson again.")
         return
 
-    # Save state
     topics = u.get("topics", [])
     topics.append(lesson["topic"])
     streak = u["streak"]
@@ -231,10 +326,9 @@ async def do_lesson(bot, chat_id, uid):
         streak += 1
     uset(uid,
          lesson=lesson, phase="listening", q_idx=0,
-         score_l=0, score_r=0,
+         score_l=0, score_r=0, v_idx=0, score_v=0, wrote=False,
          last=today, streak=streak, topics=topics[-50:])
 
-    # Send listening intro + audio
     await bot.send_message(chat_id,
         "🎧 <b>Listening Exercise</b>\n\n"
         f"Topic: <i>{lesson['topic']}</i>\n"
@@ -265,7 +359,6 @@ async def send_q(bot, chat_id, uid):
 
     if idx >= len(qs):
         if phase == "listening":
-            # Transition to reading
             uset(uid, phase="reading", q_idx=0)
             text = lesson["text"]
             await bot.send_message(chat_id,
@@ -275,7 +368,6 @@ async def send_q(bot, chat_id, uid):
                 parse_mode="HTML")
             await send_q(bot, chat_id, uid)
         else:
-            # Done with quizzes — show results + writing prompt
             await send_results(bot, chat_id, uid)
         return
 
@@ -295,6 +387,7 @@ async def send_q(bot, chat_id, uid):
 
 
 async def send_results(bot, chat_id, uid):
+    """Show quiz results, vocab list, speaking phrases, then writing prompt."""
     u = uget(uid)
     lesson = u["lesson"]
     sl, sr = u["score_l"], u["score_r"]
@@ -312,18 +405,16 @@ async def send_results(bot, chat_id, uid):
     )
 
     await bot.send_message(chat_id,
-        f"📊 <b>Results</b>\n"
+        f"📊 <b>Quiz Results</b>\n"
         f"🎧 Listening: {sl}/3\n"
         f"📖 Reading: {sr}/3\n"
         f"Total: {total}/6 ({pct}%)\n"
         f"{bar}\n\n"
         f"🗣️ <b>Speaking Practice</b>\n"
         f"Say these out loud:\n{phrases}\n\n"
-        f"📝 <b>New Vocabulary</b>\n{vocab}\n\n"
-        f"🔥 Streak: {u['streak']} days",
+        f"📝 <b>New Vocabulary</b>\n{vocab}",
         parse_mode="HTML")
 
-    # Audio for speaking phrases
     try:
         phrases_text = ". ".join(lesson["phrases"])
         audio = await make_audio(phrases_text)
@@ -333,7 +424,7 @@ async def send_results(bot, chat_id, uid):
     except Exception:
         pass
 
-    # Writing exercise prompt
+    # Writing prompt
     writing_prompt = lesson.get("writing_prompt",
         f"Write 3-5 sentences in German about your thoughts on '{lesson['topic']}'.")
 
@@ -342,11 +433,30 @@ async def send_results(bot, chat_id, uid):
         f"{writing_prompt}\n\n"
         f"<i>Write your answer in German below. "
         f"I'll check your grammar, vocabulary, and give feedback!</i>\n\n"
-        f"(or /skip to skip writing)",
+        f"(or /skip to skip to vocab quiz)",
         parse_mode="HTML")
 
-    # Keep lesson data for writing check, switch phase to "writing"
-    uset(uid, phase="writing", q_idx=0, score_l=0, score_r=0)
+    uset(uid, phase="writing")
+
+
+async def start_vocab_quiz(bot, chat_id, uid):
+    """Prepare and start the vocab quiz."""
+    u = uget(uid)
+    lesson = u.get("lesson")
+    if not lesson or not lesson.get("vocab"):
+        await finish_lesson(bot, chat_id, uid)
+        return
+
+    vq = prepare_vocab_quiz(lesson["vocab"])
+    lesson["vocab_quiz"] = vq
+    uset(uid, lesson=lesson, phase="vocab_quiz", v_idx=0, score_v=0)
+
+    await bot.send_message(chat_id,
+        f"📝 <b>Vocabulary Quiz</b>\n\n"
+        f"Let's test the {len(vq)} new words! Pick the correct meaning.",
+        parse_mode="HTML")
+
+    await send_vq(bot, chat_id, uid)
 
 
 # ═══════════════════════
@@ -359,12 +469,14 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "I'll help you practice German every day:\n"
         "🎧 Listening + quiz\n"
         "📖 Reading + quiz\n"
-        "✍️ Writing practice with AI feedback\n"
+        "✍️ Writing with AI feedback\n"
+        "📝 Vocabulary quiz\n"
         "💬 Chat practice anytime\n\n"
         f"📊 Level: <b>{u['level']}</b>\n"
         f"⏰ Daily lesson: <b>{u['hour']:02d}:{u['minute']:02d}</b> (Budapest)\n\n"
         "<b>Commands:</b>\n"
         "/lesson — get a lesson now\n"
+        "/progress — view your stats\n"
         "/level — change your level\n"
         "/time — set daily lesson time\n"
         "/streak — view your streak\n"
@@ -377,13 +489,64 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📖 <b>Commands</b>\n\n"
         "/lesson — get a lesson right now\n"
+        "/progress — view your learning stats\n"
         "/level — set your German level\n"
         "/time — set daily lesson time\n"
-        "/streak — view your learning streak\n"
+        "/streak — view your streak\n"
         "/skip — skip current exercise\n"
         "/help — this message\n\n"
         "💬 <b>Chat mode:</b> just send any text message "
         "in German or English — I'll respond, correct, and teach!",
+        parse_mode="HTML")
+
+
+async def cmd_progress(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    u = uget(update.effective_user.id)
+    hist = u.get("history", [])
+
+    if not hist:
+        await update.message.reply_text(
+            "📊 No lessons completed yet!\nUse /lesson to start your first one.")
+        return
+
+    total_lessons = len(hist)
+    avg_l = sum(h.get("listening", 0) for h in hist) / total_lessons
+    avg_r = sum(h.get("reading", 0) for h in hist) / total_lessons
+    vocab_entries = [h for h in hist if h.get("vocab_total", 0) > 0]
+    avg_v = (sum(h["vocab"] for h in vocab_entries) /
+             sum(h["vocab_total"] for h in vocab_entries) * 100) if vocab_entries else 0
+    writings = sum(1 for h in hist if h.get("writing"))
+
+    # Recent 5 lessons
+    recent = hist[-5:]
+    recent_lines = []
+    for h in reversed(recent):
+        vt = h.get("vocab_total", 0)
+        v_str = f" | V:{h.get('vocab', 0)}/{vt}" if vt else ""
+        w_str = " ✍️" if h.get("writing") else ""
+        recent_lines.append(
+            f"  {h['date']} — <i>{h['topic']}</i>\n"
+            f"    L:{h.get('listening', 0)}/3 | R:{h.get('reading', 0)}/3{v_str}{w_str}")
+
+    recent_text = "\n".join(recent_lines)
+
+    # Skill bars
+    def bar(val, mx):
+        pct = val / mx if mx else 0
+        filled = round(pct * 8)
+        return "█" * filled + "░" * (8 - filled) + f" {val:.1f}/{mx}"
+
+    await update.message.reply_text(
+        f"📊 <b>Your Progress</b>\n\n"
+        f"📚 Total lessons: <b>{total_lessons}</b>\n"
+        f"🔥 Current streak: <b>{u['streak']}</b> days\n"
+        f"📊 Level: <b>{u['level']}</b>\n"
+        f"✍️ Writings done: <b>{writings}</b>\n\n"
+        f"<b>Average Scores</b>\n"
+        f"🎧 Listening: {bar(avg_l, 3)}\n"
+        f"📖 Reading:   {bar(avg_r, 3)}\n"
+        f"📝 Vocab:     {avg_v:.0f}% correct\n\n"
+        f"<b>Recent Lessons</b>\n{recent_text}",
         parse_mode="HTML")
 
 
@@ -420,7 +583,7 @@ async def cmd_streak(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     u = uget(update.effective_user.id)
     await update.message.reply_text(
         f"🔥 Streak: <b>{u['streak']}</b> days\n"
-        f"📚 Topics covered: <b>{len(u.get('topics', []))}</b>\n"
+        f"📚 Lessons completed: <b>{len(u.get('history', []))}</b>\n"
         f"📊 Level: <b>{u['level']}</b>",
         parse_mode="HTML")
 
@@ -429,22 +592,39 @@ async def cmd_lesson(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     u = uget(uid)
     if u.get("lesson"):
-        if u.get("phase") == "writing":
+        phase = u.get("phase", "")
+        if phase == "writing":
             await update.message.reply_text(
-                "✍️ You have a writing exercise waiting!\n"
-                "Write your answer in German, or /skip to start a new lesson.")
+                "✍️ Writing exercise waiting!\n"
+                "Write in German, or /skip to move to vocab quiz.")
+        elif phase == "vocab_quiz":
+            await update.message.reply_text(
+                "📝 Vocab quiz in progress! Answer the question above.")
         else:
             await update.message.reply_text(
-                "📝 You already have an active lesson!\n"
-                "Finish the quiz or use /skip to start a new one.")
+                "📝 Active lesson! Finish the quiz or /skip.")
         return
     await do_lesson(ctx.bot, update.effective_chat.id, uid)
 
 
 async def cmd_skip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    uset(uid, lesson=None, phase=None, q_idx=0, score_l=0, score_r=0)
-    await update.message.reply_text("⏭️ Skipped. Use /lesson to start a new one.")
+    u = uget(uid)
+    phase = u.get("phase")
+
+    if phase == "writing":
+        # Skip writing → go to vocab quiz
+        await update.message.reply_text("⏭️ Writing skipped — let's test your vocab!")
+        await start_vocab_quiz(ctx.bot, update.effective_chat.id, uid)
+    elif phase == "vocab_quiz":
+        # Skip vocab quiz → finish lesson
+        await update.message.reply_text("⏭️ Vocab quiz skipped.")
+        await finish_lesson(ctx.bot, update.effective_chat.id, uid)
+    else:
+        # Skip entire lesson
+        uset(uid, lesson=None, phase=None, q_idx=0,
+             score_l=0, score_r=0, v_idx=0, score_v=0, wrote=False)
+        await update.message.reply_text("⏭️ Lesson skipped. Use /lesson to start a new one.")
 
 
 # ══════════════════════════
@@ -474,7 +654,7 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML")
         return
 
-    # Quiz answers
+    # Listening/Reading quiz answers
     if data.startswith("lq_") or data.startswith("rq_"):
         phase_key = "listening" if data.startswith("lq_") else "reading"
         parts = data.split("_")
@@ -508,10 +688,43 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"💡 {q['why']}",
             parse_mode="HTML")
 
-        # Next question
         uset(uid, q_idx=q_idx + 1)
         chat_id = query.message.chat_id
         await send_q(ctx.bot, chat_id, uid)
+        return
+
+    # Vocab quiz answers
+    if data.startswith("vq_"):
+        parts = data.split("_")
+        v_idx = int(parts[1])
+        chosen = int(parts[2])
+
+        u = uget(uid)
+        lesson = u.get("lesson")
+        if not lesson or "vocab_quiz" not in lesson:
+            await query.edit_message_text("⚠️ Session expired. Use /lesson to start new.")
+            return
+
+        vq = lesson["vocab_quiz"]
+        if v_idx >= len(vq):
+            return
+
+        q = vq[v_idx]
+        correct = chosen == q["ans"]
+        if correct:
+            uset(uid, score_v=u.get("score_v", 0) + 1)
+
+        emoji = "✅" if correct else "❌"
+        correct_opt = q["opts"][q["ans"]]
+
+        await query.edit_message_text(
+            f"📝 <b>{q['de']}</b>\n\n"
+            f"{emoji} {'Correct!' if correct else f'Answer: <b>{correct_opt}</b>'}",
+            parse_mode="HTML")
+
+        uset(uid, v_idx=v_idx + 1)
+        chat_id = query.message.chat_id
+        await send_vq(ctx.bot, chat_id, uid)
 
 
 # ═══════════════════════════
@@ -524,7 +737,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not user_text:
         return
 
-    # Writing exercise phase — check their writing
+    # Writing exercise phase
     if u.get("phase") == "writing" and u.get("lesson"):
         lesson = u["lesson"]
         await update.message.reply_text("📝 Checking your writing...")
@@ -541,20 +754,18 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("❌ Could not check your writing. Try again!")
             return
 
-        # Clear lesson state after writing
-        uset(uid, lesson=None, phase=None, q_idx=0, score_l=0, score_r=0)
+        uset(uid, wrote=True)
         await update.message.reply_text(
-            "✅ <b>Lesson complete!</b>\n\n"
-            "💬 Want more practice? Just chat with me in German!\n"
-            "📚 Or use /lesson for another lesson.",
+            "✅ Great job! Now let's test your vocabulary...",
             parse_mode="HTML")
+        await start_vocab_quiz(ctx.bot, update.effective_chat.id, uid)
         return
 
     # If in quiz phase, remind to finish
-    if u.get("lesson") and u.get("phase") in ("listening", "reading"):
+    if u.get("lesson") and u.get("phase") in ("listening", "reading", "vocab_quiz"):
         await update.message.reply_text(
-            "📝 You have an active quiz! Finish the questions first.\n"
-            "Or use /skip to start fresh.")
+            "📝 Active quiz! Answer the question above.\n"
+            "Or use /skip to skip.")
         return
 
     # Regular chat mode
@@ -599,12 +810,12 @@ async def daily_job(ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = ctx.job.data["chat_id"]
     u = uget(uid)
     if u.get("lesson"):
-        uset(uid, lesson=None, phase=None, q_idx=0, score_l=0, score_r=0)
+        uset(uid, lesson=None, phase=None, q_idx=0,
+             score_l=0, score_r=0, v_idx=0, score_v=0, wrote=False)
     await do_lesson(ctx.bot, chat_id, uid)
 
 
 async def post_init(app: Application):
-    """Schedule daily jobs for all existing users on startup."""
     data = load()
     for uid, u in data.items():
         schedule_user(app, int(uid), u.get("hour", 9), u.get("minute", 0))
@@ -625,6 +836,7 @@ def main():
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("lesson", cmd_lesson))
+    app.add_handler(CommandHandler("progress", cmd_progress))
     app.add_handler(CommandHandler("level", cmd_level))
     app.add_handler(CommandHandler("time", cmd_time))
     app.add_handler(CommandHandler("streak", cmd_streak))

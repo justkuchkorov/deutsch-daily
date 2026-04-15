@@ -73,56 +73,27 @@ async def make_audio(text):
 # ═══════════════════════════════
 #  GEMINI — lesson generation
 # ═══════════════════════════════
-async def gen_lesson(level, done_topics):
-    avoid = ", ".join(done_topics[-30:]) if done_topics else "none yet"
+async def gemini_call(prompt, system=None, history=None):
+    """Unified Gemini call with retry logic."""
+    if history:
+        contents = []
+        for h in history[-10:]:
+            contents.append({"role": h["role"], "parts": [{"text": h["text"]}]})
+        contents.append({"role": "user", "parts": [{"text": prompt}]})
+    else:
+        contents = prompt
 
-    prompt = f"""Generate a German lesson for a student at level {level}.
-
-Create a SHORT German text (4-6 simple sentences) about an everyday topic.
-Topics already done (AVOID these): {avoid}
-
-Pick from real-life topics like: beim Arzt, im Supermarkt, Wohnung suchen,
-am Bahnhof, im Restaurant bestellen, Wochenendplaene, mein Hobby, eine Reise planen,
-auf der Arbeit, meine Nachbarn, das Wetter, Sport treiben, meine Familie,
-Geburtstag feiern, im Cafe, Haustiere, Umzug, mit dem Bus fahren, Kleidung kaufen,
-Fruehstueck, Arzttermin machen, Handy-Probleme, im Park, Deutsch lernen...
-
-Return ONLY valid JSON (no markdown, no ```):
-{{
-  "topic": "topic in English",
-  "text": "German text, {level} level, 4-6 sentences",
-  "listening_qs": [
-    {{"q": "question about audio in English", "opts": ["A", "B", "C"], "ans": 0, "why": "explanation in English"}},
-    {{"q": "question 2", "opts": ["A", "B", "C"], "ans": 1, "why": "explanation"}},
-    {{"q": "question 3", "opts": ["A", "B", "C"], "ans": 2, "why": "explanation"}}
-  ],
-  "reading_qs": [
-    {{"q": "True/False statement in English", "opts": ["True", "False", "Not Given"], "ans": 0, "why": "explanation"}},
-    {{"q": "statement 2", "opts": ["True", "False", "Not Given"], "ans": 1, "why": "explanation"}},
-    {{"q": "statement 3", "opts": ["True", "False", "Not Given"], "ans": 2, "why": "explanation"}}
-  ],
-  "phrases": ["useful phrase from text 1", "phrase 2", "phrase 3", "phrase 4"],
-  "vocab": [
-    {{"de": "German word/phrase", "en": "English", "ru": "Russian"}},
-    {{"de": "word 2", "en": "English", "ru": "Russian"}},
-    {{"de": "word 3", "en": "English", "ru": "Russian"}},
-    {{"de": "word 4", "en": "English", "ru": "Russian"}},
-    {{"de": "word 5", "en": "English", "ru": "Russian"}}
-  ]
-}}"""
+    config = {"system_instruction": system} if system else None
 
     for attempt in range(3):
         try:
             resp = await asyncio.to_thread(
                 client.models.generate_content,
                 model="gemini-2.5-flash-lite",
-                contents=prompt
+                contents=contents,
+                **({"config": config} if config else {})
             )
-            txt = resp.text.strip()
-            if txt.startswith("```"):
-                txt = re.sub(r"^```\w*\n?", "", txt)
-                txt = re.sub(r"\n?```$", "", txt)
-            return json.loads(txt)
+            return resp.text
         except Exception as e:
             err = str(e)
             if ("429" in err or "RESOURCE_EXHAUSTED" in err) and attempt < 2:
@@ -130,6 +101,91 @@ Return ONLY valid JSON (no markdown, no ```):
                 await asyncio.sleep(5 * (attempt + 1))
                 continue
             raise
+
+
+async def gen_lesson(level, done_topics):
+    avoid = ", ".join(done_topics[-30:]) if done_topics else "none yet"
+
+    prompt = f"""Generate a German lesson for a student at level {level}.
+
+Create a German text (8-12 sentences) about an INTERESTING topic.
+Topics already done (AVOID these): {avoid}
+
+Pick from diverse, engaging topics like:
+- Science: Warum ist der Himmel blau, wie funktioniert das Internet, Planeten im Sonnensystem
+- History: Die Berliner Mauer, Erfindung des Buchdrucks, die Seidenstraße
+- Culture: Karneval in Deutschland, Wiener Kaffeehauskultur, deutsche Erfinder
+- Technology: Künstliche Intelligenz einfach erklärt, Elektroautos, soziale Medien
+- Nature: Warum Bäume die Blätter verlieren, das Wetter verstehen, Tiere im Winter
+- Travel: Eine Reise nach Wien, mit dem Zug durch die Schweiz, Städte am Rhein
+- Daily life: Einkaufen auf dem Markt, ein Tag im Büro, Umzug in eine neue Stadt
+- Health: Gesund essen, Sport und Gesundheit, guter Schlaf
+- Psychology: Warum wir Musik mögen, Gewohnheiten ändern, Motivation finden
+
+The text should be INFORMATIVE and teach something interesting, not just describe a routine.
+Use {level} level vocabulary but don't be afraid to introduce 2-3 new harder words (explain them in vocab).
+
+Return ONLY valid JSON (no markdown, no ```):
+{{
+  "topic": "topic in English",
+  "text": "German text, {level} level, 8-12 sentences, informative and interesting",
+  "listening_qs": [
+    {{"q": "question about the audio content in English", "opts": ["A", "B", "C"], "ans": 0, "why": "brief explanation in English"}},
+    {{"q": "question 2", "opts": ["A", "B", "C"], "ans": 1, "why": "explanation"}},
+    {{"q": "question 3", "opts": ["A", "B", "C"], "ans": 2, "why": "explanation"}}
+  ],
+  "reading_qs": [
+    {{"q": "True/False/NG statement about the text in English", "opts": ["True", "False", "Not Given"], "ans": 0, "why": "explanation referencing the text"}},
+    {{"q": "statement 2", "opts": ["True", "False", "Not Given"], "ans": 1, "why": "explanation"}},
+    {{"q": "statement 3", "opts": ["True", "False", "Not Given"], "ans": 2, "why": "explanation"}}
+  ],
+  "writing_prompt": "A question or task in English asking the student to write 3-5 sentences in German related to the topic. Should encourage personal opinion or experience.",
+  "phrases": ["useful phrase from text 1", "phrase 2", "phrase 3", "phrase 4", "phrase 5", "phrase 6"],
+  "vocab": [
+    {{"de": "German word/phrase", "en": "English", "ru": "Russian"}},
+    {{"de": "word 2", "en": "English", "ru": "Russian"}},
+    {{"de": "word 3", "en": "English", "ru": "Russian"}},
+    {{"de": "word 4", "en": "English", "ru": "Russian"}},
+    {{"de": "word 5", "en": "English", "ru": "Russian"}},
+    {{"de": "word 6", "en": "English", "ru": "Russian"}},
+    {{"de": "word 7", "en": "English", "ru": "Russian"}}
+  ]
+}}"""
+
+    txt = await gemini_call(prompt)
+    txt = txt.strip()
+    if txt.startswith("```"):
+        txt = re.sub(r"^```\w*\n?", "", txt)
+        txt = re.sub(r"\n?```$", "", txt)
+    return json.loads(txt)
+
+
+async def check_writing(text, topic, level):
+    prompt = f"""A {level} German student wrote this text about "{topic}":
+
+"{text}"
+
+Review their writing. Be encouraging but thorough. Format your response like this:
+
+📝 **Your text:**
+(quote their text)
+
+✅ **What you did well:**
+- (1-2 positive points)
+
+❌ **Corrections:**
+- (list each grammar/spelling mistake with the fix)
+- Format: "❌ [wrong] → ✅ [correct]" with brief explanation
+
+📖 **Improved version:**
+(rewrite their text with all corrections applied)
+
+💡 **Tips:**
+- (1-2 tips for improvement at their level)
+
+Keep it concise and educational. Use English for explanations, German for examples."""
+
+    return await gemini_call(prompt)
 
 
 async def chat_reply(msg, level, history):
@@ -143,27 +199,7 @@ Rules:
 - Be encouraging and natural
 - Match vocabulary to their {level} level"""
 
-    contents = []
-    for h in history[-10:]:
-        contents.append({"role": h["role"], "parts": [{"text": h["text"]}]})
-    contents.append({"role": "user", "parts": [{"text": msg}]})
-
-    for attempt in range(3):
-        try:
-            resp = await asyncio.to_thread(
-                client.models.generate_content,
-                model="gemini-2.5-flash-lite",
-                contents=contents,
-                config={"system_instruction": system}
-            )
-            return resp.text
-        except Exception as e:
-            err = str(e)
-            if ("429" in err or "RESOURCE_EXHAUSTED" in err) and attempt < 2:
-                log.warning(f"Rate limited, retrying in {5 * (attempt + 1)}s...")
-                await asyncio.sleep(5 * (attempt + 1))
-                continue
-            raise
+    return await gemini_call(msg, system=system, history=history)
 
 
 # ══════════════════════════
@@ -239,7 +275,7 @@ async def send_q(bot, chat_id, uid):
                 parse_mode="HTML")
             await send_q(bot, chat_id, uid)
         else:
-            # Done — show results
+            # Done with quizzes — show results + writing prompt
             await send_results(bot, chat_id, uid)
         return
 
@@ -284,11 +320,10 @@ async def send_results(bot, chat_id, uid):
         f"🗣️ <b>Speaking Practice</b>\n"
         f"Say these out loud:\n{phrases}\n\n"
         f"📝 <b>New Vocabulary</b>\n{vocab}\n\n"
-        f"🔥 Streak: {u['streak']} days\n\n"
-        f"💬 Want to practice more? Just write me in German!",
+        f"🔥 Streak: {u['streak']} days",
         parse_mode="HTML")
 
-    # Try to generate audio for speaking phrases
+    # Audio for speaking phrases
     try:
         phrases_text = ". ".join(lesson["phrases"])
         audio = await make_audio(phrases_text)
@@ -298,8 +333,20 @@ async def send_results(bot, chat_id, uid):
     except Exception:
         pass
 
-    # Clear lesson state
-    uset(uid, lesson=None, phase=None, q_idx=0, score_l=0, score_r=0)
+    # Writing exercise prompt
+    writing_prompt = lesson.get("writing_prompt",
+        f"Write 3-5 sentences in German about your thoughts on '{lesson['topic']}'.")
+
+    await bot.send_message(chat_id,
+        f"✍️ <b>Writing Exercise</b>\n\n"
+        f"{writing_prompt}\n\n"
+        f"<i>Write your answer in German below. "
+        f"I'll check your grammar, vocabulary, and give feedback!</i>\n\n"
+        f"(or /skip to skip writing)",
+        parse_mode="HTML")
+
+    # Keep lesson data for writing check, switch phase to "writing"
+    uset(uid, phase="writing", q_idx=0, score_l=0, score_r=0)
 
 
 # ═══════════════════════
@@ -312,7 +359,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "I'll help you practice German every day:\n"
         "🎧 Listening + quiz\n"
         "📖 Reading + quiz\n"
-        "🗣️ Speaking phrases + vocab\n"
+        "✍️ Writing practice with AI feedback\n"
         "💬 Chat practice anytime\n\n"
         f"📊 Level: <b>{u['level']}</b>\n"
         f"⏰ Daily lesson: <b>{u['hour']:02d}:{u['minute']:02d}</b> (Budapest)\n\n"
@@ -333,7 +380,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/level — set your German level\n"
         "/time — set daily lesson time\n"
         "/streak — view your learning streak\n"
-        "/skip — skip current quiz\n"
+        "/skip — skip current exercise\n"
         "/help — this message\n\n"
         "💬 <b>Chat mode:</b> just send any text message "
         "in German or English — I'll respond, correct, and teach!",
@@ -382,9 +429,14 @@ async def cmd_lesson(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     u = uget(uid)
     if u.get("lesson"):
-        await update.message.reply_text(
-            "📝 You already have an active lesson!\n"
-            "Finish the quiz or use /skip to start a new one.")
+        if u.get("phase") == "writing":
+            await update.message.reply_text(
+                "✍️ You have a writing exercise waiting!\n"
+                "Write your answer in German, or /skip to start a new lesson.")
+        else:
+            await update.message.reply_text(
+                "📝 You already have an active lesson!\n"
+                "Finish the quiz or use /skip to start a new one.")
         return
     await do_lesson(ctx.bot, update.effective_chat.id, uid)
 
@@ -392,7 +444,7 @@ async def cmd_lesson(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_skip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     uset(uid, lesson=None, phase=None, q_idx=0, score_l=0, score_r=0)
-    await update.message.reply_text("⏭️ Quiz skipped. Use /lesson to start a new one.")
+    await update.message.reply_text("⏭️ Skipped. Use /lesson to start a new one.")
 
 
 # ══════════════════════════
@@ -468,23 +520,48 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     u = uget(uid)
-
-    # If in lesson, remind to finish
-    if u.get("lesson"):
-        await update.message.reply_text(
-            "📝 You have an active lesson! Finish the quiz first.\n"
-            "Or use /skip to start fresh.")
-        return
-
     user_text = update.message.text
     if not user_text:
         return
 
+    # Writing exercise phase — check their writing
+    if u.get("phase") == "writing" and u.get("lesson"):
+        lesson = u["lesson"]
+        await update.message.reply_text("📝 Checking your writing...")
+        try:
+            feedback = await check_writing(user_text, lesson["topic"], u["level"])
+            await update.message.reply_text(feedback)
+        except Exception as e:
+            log.error(f"Writing check error: {e}")
+            err = str(e)
+            if "429" in err or "RESOURCE_EXHAUSTED" in err:
+                await update.message.reply_text(
+                    "⏳ API limit reached. Try again in 10-15 minutes.")
+            else:
+                await update.message.reply_text("❌ Could not check your writing. Try again!")
+            return
+
+        # Clear lesson state after writing
+        uset(uid, lesson=None, phase=None, q_idx=0, score_l=0, score_r=0)
+        await update.message.reply_text(
+            "✅ <b>Lesson complete!</b>\n\n"
+            "💬 Want more practice? Just chat with me in German!\n"
+            "📚 Or use /lesson for another lesson.",
+            parse_mode="HTML")
+        return
+
+    # If in quiz phase, remind to finish
+    if u.get("lesson") and u.get("phase") in ("listening", "reading"):
+        await update.message.reply_text(
+            "📝 You have an active quiz! Finish the questions first.\n"
+            "Or use /skip to start fresh.")
+        return
+
+    # Regular chat mode
     try:
         history = u.get("chat", [])
         reply = await chat_reply(user_text, u["level"], history)
 
-        # Save chat history
         history.append({"role": "user", "text": user_text})
         history.append({"role": "model", "text": reply})
         uset(uid, chat=history[-20:])
@@ -495,8 +572,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         err = str(e)
         if "429" in err or "RESOURCE_EXHAUSTED" in err:
             await update.message.reply_text(
-                "⏳ API limit reached (free tier). Try again in 10-15 minutes.\n"
-                "Try again later — or use /lesson in the morning!")
+                "⏳ API limit reached (free tier). Try again in 10-15 minutes.")
         else:
             await update.message.reply_text("❌ Something went wrong. Try again!")
 
@@ -506,11 +582,9 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ═══════════════════════════
 def schedule_user(app, uid, hour, minute):
     job_id = f"daily_{uid}"
-    # Remove existing job
     existing = app.job_queue.get_jobs_by_name(job_id)
     for job in existing:
         job.schedule_removal()
-    # Add new daily job
     app.job_queue.run_daily(
         daily_job,
         time=dtime(hour=hour, minute=minute, tzinfo=TZ),
@@ -525,7 +599,6 @@ async def daily_job(ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = ctx.job.data["chat_id"]
     u = uget(uid)
     if u.get("lesson"):
-        # Clear stale lesson before sending new one
         uset(uid, lesson=None, phase=None, q_idx=0, score_l=0, score_r=0)
     await do_lesson(ctx.bot, chat_id, uid)
 

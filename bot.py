@@ -16,7 +16,8 @@ log = logging.getLogger("bot")
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 GEMINI_KEY = os.environ["GEMINI_KEY"]
 TZ = ZoneInfo("Europe/Budapest")
-DATA = "data.json"
+DATA_DIR = "/data" if os.path.isdir("/data") else "."
+DATA = os.path.join(DATA_DIR, "data.json")
 
 client = genai.Client(api_key=GEMINI_KEY)
 
@@ -110,16 +111,25 @@ Return ONLY valid JSON (no markdown, no ```):
   ]
 }}"""
 
-    resp = await asyncio.to_thread(
-        client.models.generate_content,
-        model="gemini-2.0-flash-lite",
-        contents=prompt
-    )
-    txt = resp.text.strip()
-    if txt.startswith("```"):
-        txt = re.sub(r"^```\w*\n?", "", txt)
-        txt = re.sub(r"\n?```$", "", txt)
-    return json.loads(txt)
+    for attempt in range(3):
+        try:
+            resp = await asyncio.to_thread(
+                client.models.generate_content,
+                model="gemini-2.0-flash-lite",
+                contents=prompt
+            )
+            txt = resp.text.strip()
+            if txt.startswith("```"):
+                txt = re.sub(r"^```\w*\n?", "", txt)
+                txt = re.sub(r"\n?```$", "", txt)
+            return json.loads(txt)
+        except Exception as e:
+            err = str(e)
+            if ("429" in err or "RESOURCE_EXHAUSTED" in err) and attempt < 2:
+                log.warning(f"Rate limited, retrying in {5 * (attempt + 1)}s...")
+                await asyncio.sleep(5 * (attempt + 1))
+                continue
+            raise
 
 
 async def chat_reply(msg, level, history):
@@ -138,13 +148,22 @@ Rules:
         contents.append({"role": h["role"], "parts": [{"text": h["text"]}]})
     contents.append({"role": "user", "parts": [{"text": msg}]})
 
-    resp = await asyncio.to_thread(
-        client.models.generate_content,
-        model="gemini-2.0-flash-lite",
-        contents=contents,
-        config={"system_instruction": system}
-    )
-    return resp.text
+    for attempt in range(3):
+        try:
+            resp = await asyncio.to_thread(
+                client.models.generate_content,
+                model="gemini-2.0-flash-lite",
+                contents=contents,
+                config={"system_instruction": system}
+            )
+            return resp.text
+        except Exception as e:
+            err = str(e)
+            if ("429" in err or "RESOURCE_EXHAUSTED" in err) and attempt < 2:
+                log.warning(f"Rate limited, retrying in {5 * (attempt + 1)}s...")
+                await asyncio.sleep(5 * (attempt + 1))
+                continue
+            raise
 
 
 # ══════════════════════════
@@ -163,8 +182,7 @@ async def do_lesson(bot, chat_id, uid):
         err = str(e)
         if "429" in err or "RESOURCE_EXHAUSTED" in err:
             await bot.send_message(chat_id,
-                "⏳ Daily API limit reached. Resets around 9:00 AM Budapest time.\n"
-                "Try again later!")
+                "⏳ API limit reached (free tier). Try again in 10-15 minutes.")
         else:
             await bot.send_message(chat_id, "❌ Lesson generation failed. Try /lesson again.")
         return
@@ -477,7 +495,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         err = str(e)
         if "429" in err or "RESOURCE_EXHAUSTED" in err:
             await update.message.reply_text(
-                "⏳ Daily API limit reached. Resets around 9:00 AM Budapest time.\n"
+                "⏳ API limit reached (free tier). Try again in 10-15 minutes.\n"
                 "Try again later — or use /lesson in the morning!")
         else:
             await update.message.reply_text("❌ Something went wrong. Try again!")

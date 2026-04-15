@@ -115,7 +115,7 @@ Return ONLY valid JSON (no markdown, no ```):
         try:
             resp = await asyncio.to_thread(
                 client.models.generate_content,
-                model="gemini-2.0-flash-lite",
+                model="gemini-2.5-flash-lite",
                 contents=prompt
             )
             txt = resp.text.strip()
@@ -152,7 +152,7 @@ Rules:
         try:
             resp = await asyncio.to_thread(
                 client.models.generate_content,
-                model="gemini-2.0-flash-lite",
+                model="gemini-2.5-flash-lite",
                 contents=contents,
                 config={"system_instruction": system}
             )

@@ -139,6 +139,12 @@ Return ONLY valid JSON (no markdown, no ```):
     {{"q": "statement 2", "opts": ["True", "False", "Not Given"], "ans": 1, "why": "explanation"}},
     {{"q": "statement 3", "opts": ["True", "False", "Not Given"], "ans": 2, "why": "explanation"}}
   ],
+  "grammar_tip": {{
+    "rule": "Grammar rule name in English (e.g. Akkusativ after 'für', Perfekt with 'haben')",
+    "explanation": "Clear, concise explanation of the rule in English (2-3 sentences, {level} appropriate)",
+    "example": "An example sentence FROM the text above that demonstrates this rule",
+    "highlight": "The specific part of the example that shows the rule"
+  }},
   "writing_prompt": "A question or task in English asking the student to write 3-5 sentences in German related to the topic. Should encourage personal opinion or experience.",
   "phrases": ["useful phrase from text 1", "phrase 2", "phrase 3", "phrase 4", "phrase 5", "phrase 6"],
   "vocab": [
@@ -404,12 +410,23 @@ async def send_results(bot, chat_id, uid):
         for v in lesson["vocab"]
     )
 
+    # Grammar tip
+    grammar = lesson.get("grammar_tip", {})
+    grammar_text = ""
+    if grammar:
+        grammar_text = (
+            f"\n\n📐 <b>Grammar Tip: {grammar.get('rule', '')}</b>\n"
+            f"{grammar.get('explanation', '')}\n"
+            f"📌 <i>{grammar.get('example', '')}</i>\n"
+            f"→ {grammar.get('highlight', '')}")
+
     await bot.send_message(chat_id,
         f"📊 <b>Quiz Results</b>\n"
         f"🎧 Listening: {sl}/3\n"
         f"📖 Reading: {sr}/3\n"
         f"Total: {total}/6 ({pct}%)\n"
-        f"{bar}\n\n"
+        f"{bar}"
+        f"{grammar_text}\n\n"
         f"🗣️ <b>Speaking Practice</b>\n"
         f"Say these out loud:\n{phrases}\n\n"
         f"📝 <b>New Vocabulary</b>\n{vocab}",

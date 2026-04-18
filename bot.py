@@ -22,6 +22,15 @@ DATA = os.path.join(DATA_DIR, "data.json")
 client = genai.Client(api_key=GEMINI_KEY)
 
 
+def strip_md(text):
+    """Remove markdown formatting that Telegram can't render."""
+    text = re.sub(r"\*{1,2}(.+?)\*{1,2}", r"\1", text)  # **bold** / *italic*
+    text = re.sub(r"^#{1,3}\s+", "", text, flags=re.MULTILINE)  # ### headers
+    text = text.replace("---", "")  # horizontal rules
+    text = re.sub(r"`{1,3}(.+?)`{1,3}", r"\1", text)  # `code`
+    return text.strip()
+
+
 # ═══════════════════════════════════
 #  STORAGE — simple JSON persistence
 # ═══════════════════════════════════
@@ -176,25 +185,27 @@ async def check_writing(text, topic, level):
 
 Review their writing. Be encouraging but thorough. Format your response like this:
 
-📝 **Your text:**
+📝 Your text:
 (quote their text)
 
-✅ **What you did well:**
+✅ What you did well:
 - (1-2 positive points)
 
-❌ **Corrections:**
+❌ Corrections:
 - (list each grammar/spelling mistake with the fix)
 - Format: "❌ [wrong] → ✅ [correct]" with brief explanation
 
-📖 **Improved version:**
+📖 Improved version:
 (rewrite their text with all corrections applied)
 
-💡 **Tips:**
+💡 Tips:
 - (1-2 tips for improvement at their level)
 
-Keep it concise and educational. Use English for explanations, German for examples."""
+Keep it concise and educational. Use English for explanations, German for examples.
+NEVER use markdown formatting (no **, *, #, ---, ```). Use plain text and emojis only."""
 
-    return await gemini_call(prompt)
+    reply = await gemini_call(prompt)
+    return strip_md(reply)
 
 
 async def chat_reply(msg, level, history):
@@ -206,9 +217,12 @@ Rules:
 - Correct grammar mistakes gently
 - Keep responses under 150 words
 - Be encouraging and natural
-- Match vocabulary to their {level} level"""
+- Match vocabulary to their {level} level
+- NEVER use markdown formatting (no **, *, #, ---, ```)
+- Use plain text only — no bold, italic, headers, or horizontal rules"""
 
-    return await gemini_call(msg, system=system, history=history)
+    reply = await gemini_call(msg, system=system, history=history)
+    return strip_md(reply)
 
 
 # ══════════════════════════════

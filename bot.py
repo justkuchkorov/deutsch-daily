@@ -163,7 +163,10 @@ Return ONLY valid JSON (no markdown, no ```):
     if txt.startswith("```"):
         txt = re.sub(r"^```\w*\n?", "", txt)
         txt = re.sub(r"\n?```$", "", txt)
-    return json.loads(txt)
+    lesson = json.loads(txt)
+    # Strip markdown that Telegram HTML mode can't render
+    lesson["text"] = re.sub(r"\*{1,2}(.+?)\*{1,2}", r"\1", lesson["text"])
+    return lesson
 
 
 async def check_writing(text, topic, level):

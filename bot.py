@@ -8,6 +8,7 @@ from telegram.ext import (
 )
 from google import genai
 import edge_tts
+from momente import get_lesson_context, get_unit_vocab, get_unit_phrases, get_all_vocab_up_to, MOMENTE_A2_1
 
 # ── Config ──
 logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO)
@@ -55,7 +56,8 @@ def uget(uid):
             "chat": [], "history": [],
             "lesson": None, "phase": None,
             "q_idx": 0, "score_l": 0, "score_r": 0,
-            "v_idx": 0, "score_v": 0, "wrote": False
+            "v_idx": 0, "score_v": 0, "wrote": False,
+            "momente_unit": 0
         }
         save(d)
     return d[uid]
@@ -112,14 +114,40 @@ async def gemini_call(prompt, system=None, history=None):
             raise
 
 
-async def gen_lesson(level, done_topics):
+async def gen_lesson(level, done_topics, momente_unit=0):
     avoid = ", ".join(done_topics[-30:]) if done_topics else "none yet"
 
-    prompt = f"""Generate a German lesson for a student at level {level}.
+    # Build Momente curriculum context if a unit is active
+    momente_block = ""
+    if momente_unit and momente_unit in MOMENTE_A2_1:
+        ctx = get_lesson_context(momente_unit)
+        unit_data = MOMENTE_A2_1[momente_unit]
+        phrases = get_unit_phrases(momente_unit)
+        phrases_str = "\n".join(f"  - {p}" for p in phrases)
+        vocab_full = "\n".join(f"  - {v['de']} = {v['en']}" for v in unit_data["vocab"])
+        momente_block = f"""
+IMPORTANT: This lesson MUST be based on the student's current textbook unit.
 
+Momente A2.1 — Lektion {momente_unit}: "{ctx['title']}"
+Theme: {ctx['theme']}
+Topics: {', '.join(ctx['topics'])}
+Grammar to practice: {ctx['grammar']}
+
+Key vocabulary to USE in the text (use as many as natural):
+{vocab_full}
+
+Example phrases from the textbook:
+{phrases_str}
+
+The text MUST revolve around the theme "{ctx['theme']}" and naturally use the grammar patterns above.
+Use the vocabulary words listed above in your text. The topic should feel like a natural extension of the textbook lesson.
+"""
+
+    prompt = f"""Generate a German lesson for a student at level {level}.
+{momente_block}
 Create a German text (8-12 sentences) about an INTERESTING topic.
 Topics already done (AVOID these): {avoid}
-
+{"" if momente_block else '''
 Pick from diverse, engaging topics like:
 - Science: Warum ist der Himmel blau, wie funktioniert das Internet, Planeten im Sonnensystem
 - History: Die Berliner Mauer, Erfindung des Buchdrucks, die Seidenstraße
@@ -130,7 +158,7 @@ Pick from diverse, engaging topics like:
 - Daily life: Einkaufen auf dem Markt, ein Tag im Büro, Umzug in eine neue Stadt
 - Health: Gesund essen, Sport und Gesundheit, guter Schlaf
 - Psychology: Warum wir Musik mögen, Gewohnheiten ändern, Motivation finden
-
+'''}
 The text should be INFORMATIVE and teach something interesting, not just describe a routine.
 Use {level} level vocabulary but introduce 2-3 new harder words (explain them in vocab).
 
@@ -157,13 +185,13 @@ Return ONLY valid JSON (no markdown, no ```):
   "writing_prompt": "A question or task in English asking the student to write 3-5 sentences in German related to the topic. Should encourage personal opinion or experience.",
   "phrases": ["useful phrase from text 1", "phrase 2", "phrase 3", "phrase 4", "phrase 5", "phrase 6"],
   "vocab": [
-    {{"de": "German word/phrase", "en": "English", "ru": "Russian"}},
-    {{"de": "word 2", "en": "English", "ru": "Russian"}},
-    {{"de": "word 3", "en": "English", "ru": "Russian"}},
-    {{"de": "word 4", "en": "English", "ru": "Russian"}},
-    {{"de": "word 5", "en": "English", "ru": "Russian"}},
-    {{"de": "word 6", "en": "English", "ru": "Russian"}},
-    {{"de": "word 7", "en": "English", "ru": "Russian"}}
+    {{"de": "German word/phrase", "en": "English", "uz": "Uzbek"}},
+    {{"de": "word 2", "en": "English", "uz": "Uzbek"}},
+    {{"de": "word 3", "en": "English", "uz": "Uzbek"}},
+    {{"de": "word 4", "en": "English", "uz": "Uzbek"}},
+    {{"de": "word 5", "en": "English", "uz": "Uzbek"}},
+    {{"de": "word 6", "en": "English", "uz": "Uzbek"}},
+    {{"de": "word 7", "en": "English", "uz": "Uzbek"}}
   ]
 }}"""
 
@@ -175,6 +203,9 @@ Return ONLY valid JSON (no markdown, no ```):
     lesson = json.loads(txt)
     # Strip markdown that Telegram HTML mode can't render
     lesson["text"] = re.sub(r"\*{1,2}(.+?)\*{1,2}", r"\1", lesson["text"])
+    # Tag lesson with momente unit if applicable
+    if momente_unit:
+        lesson["momente_unit"] = momente_unit
     return lesson
 
 
@@ -331,7 +362,7 @@ async def do_lesson(bot, chat_id, uid):
     await bot.send_message(chat_id, "⏳ Generating your lesson...")
 
     try:
-        lesson = await gen_lesson(u["level"], u.get("topics", []))
+        lesson = await gen_lesson(u["level"], u.get("topics", []), u.get("momente_unit", 0))
     except Exception as e:
         log.error(f"Gemini error: {e}")
         err = str(e)
@@ -352,8 +383,12 @@ async def do_lesson(bot, chat_id, uid):
          score_l=0, score_r=0, v_idx=0, score_v=0, wrote=False,
          last=today, streak=streak, topics=topics[-50:])
 
+    momente_tag = ""
+    if lesson.get("momente_unit"):
+        momente_tag = f"📚 Momente A2.1 — Lektion {lesson['momente_unit']}\n"
     await bot.send_message(chat_id,
-        "🎧 <b>Listening Exercise</b>\n\n"
+        f"🎧 <b>Listening Exercise</b>\n\n"
+        f"{momente_tag}"
         f"Topic: <i>{lesson['topic']}</i>\n"
         "Listen carefully, then answer the questions.",
         parse_mode="HTML")
@@ -427,7 +462,7 @@ async def send_results(bot, chat_id, uid):
 
     phrases = "\n".join(f"  🗣️ <i>{p}</i>" for p in lesson["phrases"])
     vocab = "\n".join(
-        f"  • <b>{v['de']}</b> — {v['en']} / {v['ru']}"
+        f"  • <b>{v['de']}</b> — {v['en']} / {v.get('uz', v.get('ru', ''))}"
         for v in lesson["vocab"]
     )
 
@@ -514,6 +549,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"⏰ Daily lesson: <b>{u['hour']:02d}:{u['minute']:02d}</b> (Budapest)\n\n"
         "<b>Commands:</b>\n"
         "/lesson — get a lesson now\n"
+        "/momente — set your textbook unit\n"
         "/progress — view your stats\n"
         "/level — change your level\n"
         "/time — set daily lesson time\n"
@@ -527,6 +563,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📖 <b>Commands</b>\n\n"
         "/lesson — get a lesson right now\n"
+        "/momente — set Momente A2.1 textbook unit\n"
         "/progress — view your learning stats\n"
         "/level — set your German level\n"
         "/time — set daily lesson time\n"
@@ -665,6 +702,37 @@ async def cmd_skip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⏭️ Lesson skipped. Use /lesson to start a new one.")
 
 
+async def cmd_momente(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Set current Momente A2.1 unit for curriculum-aligned lessons."""
+    uid = update.effective_user.id
+    u = uget(uid)
+    current = u.get("momente_unit", 0)
+
+    buttons = []
+    row = []
+    for unit_num in sorted(MOMENTE_A2_1.keys()):
+        label = f"{'✅ ' if unit_num == current else ''}Lektion {unit_num}"
+        row.append(InlineKeyboardButton(label, callback_data=f"mom_{unit_num}"))
+        if len(row) == 3:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    # Add "Free mode" option to disable Momente
+    buttons.append([InlineKeyboardButton(
+        f"{'✅ ' if current == 0 else ''}Free Mode (random topics)",
+        callback_data="mom_0")])
+
+    current_text = f"Lektion {current}" if current else "Free Mode"
+    await update.message.reply_text(
+        f"📚 <b>Momente A2.1</b>\n\n"
+        f"Current: <b>{current_text}</b>\n\n"
+        f"Select a unit to align your lessons with your textbook.\n"
+        f"Lessons will use that unit's grammar, vocab, and themes.",
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode="HTML")
+
+
 # ══════════════════════════
 #  CALLBACK HANDLER
 # ══════════════════════════
@@ -673,6 +741,24 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data
     uid = query.from_user.id
+
+    # Momente unit selection
+    if data.startswith("mom_"):
+        unit = int(data[4:])
+        uset(uid, momente_unit=unit)
+        if unit == 0:
+            await query.edit_message_text(
+                "✅ <b>Free Mode</b> — lessons on random interesting topics.",
+                parse_mode="HTML")
+        else:
+            ctx_data = get_lesson_context(unit)
+            await query.edit_message_text(
+                f"✅ <b>Lektion {unit}: {ctx_data['title']}</b>\n\n"
+                f"Theme: {ctx_data['theme']}\n"
+                f"Grammar: {ctx_data['grammar']}\n\n"
+                f"Your next /lesson will be aligned with this unit!",
+                parse_mode="HTML")
+        return
 
     # Level selection
     if data.startswith("lvl_"):
@@ -879,6 +965,7 @@ def main():
     app.add_handler(CommandHandler("time", cmd_time))
     app.add_handler(CommandHandler("streak", cmd_streak))
     app.add_handler(CommandHandler("skip", cmd_skip))
+    app.add_handler(CommandHandler("momente", cmd_momente))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 

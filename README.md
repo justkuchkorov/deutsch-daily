@@ -29,6 +29,7 @@ Each lesson includes:
 | Command | Description |
 |---------|-------------|
 | `/lesson` | Get a lesson now |
+| `/momente` | Set Momente A2.1 textbook unit |
 | `/progress` | View your learning stats |
 | `/level` | Set your German level (A1–B1.2) |
 | `/time` | Set daily lesson time (Budapest TZ) |
